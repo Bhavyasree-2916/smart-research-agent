@@ -1,0 +1,19 @@
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env / caches / local data
+.venv/
+.env
+.chroma/
+.cache/
+*.log
+
+# OS / Editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+EOF
