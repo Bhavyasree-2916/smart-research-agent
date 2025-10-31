@@ -1,17 +1,28 @@
-# Streamlit + libs
+# =============================
+# Smart Research → Brief → Quiz Agent
+# Stable requirements for Streamlit Cloud
+# =============================
+
+# Core
 streamlit==1.38.0
 requests==2.32.3
 python-dotenv==1.0.1
 textstat==0.7.3
 supabase==2.6.0
 
-# Chroma (stable pin for cloud)
-chromadb==0.5.0
-pydantic==1.10.13
-
-# Sentence-Transformers (CPU-only)
+# NLP / Embedding tools
+chromadb==0.4.24
 sentence-transformers==2.2.2
-torch==2.2.2
-torchvision==0.17.2
-torchaudio==2.2.2
---extra-index-url https://download.pytorch.org/whl/cpu
+pydantic==1.10.13
+numpy==1.26.4
+
+# SQLite fix for Streamlit Cloud
+pysqlite3-binary==0.5.2.post3
+
+# Optional: for clean Markdown & HTML parsing
+beautifulsoup4==4.12.3
+markdown-it-py==3.0.0
+
+# OpenAI + LLM APIs
+openai==1.30.0
+tqdm==4.66.5
