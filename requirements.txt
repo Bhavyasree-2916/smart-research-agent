@@ -5,14 +5,16 @@
 
 # Core
 streamlit==1.38.0
+openai==1.30.0
 requests==2.32.3
 python-dotenv==1.0.1
 textstat==0.7.3
 supabase==2.6.0
 
 # NLP / Embedding tools
-chromadb==0.4.24
-sentence-transformers==2.2.2
+chromadb==0.5.3
+sentence-transformers==3.0.1
+textstat==0.7.3
 pydantic==1.10.13
 numpy==1.26.4
 
@@ -26,3 +28,8 @@ markdown-it-py==3.0.0
 # OpenAI + LLM APIs
 openai==1.30.0
 tqdm==4.66.5
+
+#utils
+tiktoken==0.7.0
+numpy==1.26.4
+pandas==2.2.2
