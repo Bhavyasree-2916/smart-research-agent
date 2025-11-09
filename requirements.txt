@@ -1,17 +1,18 @@
+# Core
 streamlit==1.38.0
 openai==1.30.1
 requests==2.32.3
 python-dotenv==1.0.1
+
+# Text analysis + readability
 textstat==0.7.3
 
-# Supabase SDKs (optional cloud save)
-supabase==1.0.3
-postgrest==0.13.0
-gotrue==1.0.0
-realtime==1.0.0
-storage3==0.6.0
+# Vector store (Chroma) + deps compatible with 3.11
+chromadb==0.4.24
+pydantic==1.10.13
 
-numpy==1.26.4
-typing-extensions==4.12.2
-setuptools<70
-wheel
+# Supabase client (optional; safe to keep)
+supabase==2.6.0
+
+# SQLite wheel for cloud builds
+pysqlite3-binary==0.5.2.post5
