@@ -1,42 +1,47 @@
-import os, uuid
-from typing import List, Dict
-from sentence_transformers import SentenceTransformer
+# tools/vecstore.py
+import os
 import chromadb
+from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 
-# One persistent DB for the app
-DB_DIR = os.path.join(os.getcwd(), ".chroma")
-os.makedirs(DB_DIR, exist_ok=True)
+# ---- Configure an OpenAI embedding function (no torch needed) ----
+def _embedding_fn():
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is required on Streamlit Cloud to build embeddings. "
+            "Set it in Settings → Secrets."
+        )
+    return embedding_functions.OpenAIEmbeddingFunction(
+        api_key=key,
+        model_name="text-embedding-3-small"
+    )
 
-_client = chromadb.PersistentClient(path=DB_DIR)
-_model = SentenceTransformer("all-MiniLM-L6-v2")
+def _client():
+    # in-memory DB is fine for the mini project
+    return chromadb.Client(Settings(anonymized_telemetry=False))
 
-def _embed(texts: List[str]) -> List[List[float]]:
-    return _model.encode(texts, normalize_embeddings=True).tolist()
-
-def get_collection(topic_id: str):
-    name = f"topic_{topic_id}".replace("-", "_")
-    try:
-        col = _client.get_collection(name=name)
-    except:
-        col = _client.create_collection(name=name)
+def get_store(topic_id: str = "default"):
+    coll_name = f"topic_{topic_id[:8]}"
+    client = _client()
+    col = client.get_or_create_collection(
+        name=coll_name,
+        embedding_function=_embedding_fn()
+    )
     return col
 
-def upsert_chunks(topic_id: str, chunks: List[Dict]):
-    col = get_collection(topic_id)
-    texts = [c["text"] for c in chunks]
-    ids   = [c["id"] for c in chunks]
-    metas = [c.get("metadata", {}) for c in chunks]
-    col.upsert(ids=ids, documents=texts, metadatas=metas, embeddings=_embed(texts))
+# ---- Helpers used by researcher/synthesizer ----
+def upsert_chunks(col, texts, ids, metas=None):
+    metas = metas or [{}] * len(texts)
+    col.add(documents=texts, ids=ids, metadatas=metas)
 
-def query(topic_id: str, q: str, k: int = 15) -> List[Dict]:
-    col = get_collection(topic_id)
-    res = col.query(query_embeddings=_embed([q]), n_results=k)
-    out=[]
-    for i in range(len(res["ids"][0])):
+def query(col, text, k=5):
+    res = col.query(query_texts=[text], n_results=k)
+    out = []
+    for i in range(len(res.get("ids", [[]])[0])):
         out.append({
             "id": res["ids"][0][i],
             "text": res["documents"][0][i],
-            "metadata": res["metadatas"][0][i],
+            "metadata": (res.get("metadatas") or [[{}]])[0][i]
         })
     return out
