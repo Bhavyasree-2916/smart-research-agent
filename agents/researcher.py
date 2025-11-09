@@ -1,5 +1,5 @@
 from tools.wikipedia import search_wikipedia, read_wikipedia_page
-from tools.vecstore import upsert_chunks
+from tools.vecstore import upsert_chunks_simple
 from urllib.parse import urlparse
 
 def _split(text, size=800, overlap=120):

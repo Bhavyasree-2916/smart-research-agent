@@ -1,67 +1,79 @@
-# tools/vecstore.py
-import os
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
+import os, json, sqlite3, uuid, math
+import numpy as np
+from typing import List, Dict, Any, Tuple
+from config import EMBEDDING_MODEL, OPENAI_API_KEY
+from openai import OpenAI
 
-def _embedding_fn():
-    """Create safe OpenAI embedding function."""
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("Missing OPENAI_API_KEY in environment or Streamlit secrets.")
-    return embedding_functions.OpenAIEmbeddingFunction(
-        api_key=key,
-        model_name="text-embedding-3-small"
-    )
+DB_PATH = os.environ.get("RAG_DB_PATH", "store.sqlite3")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-def _client():
-    """Return in-memory chroma client (safe for Streamlit Cloud)."""
-    return chromadb.Client(Settings(anonymized_telemetry=False))
-
-def get_store(topic_id="default"):
-    name = f"topic_{(topic_id or 'default')[:20]}"
-    client = _client()
-    try:
-        col = client.get_or_create_collection(
-            name=name,
-            embedding_function=_embedding_fn()
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS docs(
+            id TEXT PRIMARY KEY,
+            topic_id TEXT,
+            text TEXT,
+            meta TEXT,
+            embedding TEXT  -- store as JSON list for portability
         )
-    except Exception as e:
-        print(f"[Warning] Fallback: collection created without embedding. Reason: {e}")
-        col = client.get_or_create_collection(name=name)
-    return col
+    """)
+    conn.commit()
+    return conn
 
-def upsert_chunks(col, texts, ids, metas=None):
-    """Safely add chunks into the collection."""
-    if not texts:
-        return
-    metas = metas or [{}] * len(texts)
-    try:
-        col.add(documents=texts, ids=ids, metadatas=metas)
-    except Exception as e:
-        print(f"[Warning] Skipped adding chunks: {e}")
+def embed(texts: List[str]) -> List[List[float]]:
+    # batch to be polite
+    out = []
+    batch = 50
+    for i in range(0, len(texts), batch):
+        part = texts[i:i+batch]
+        resp = client.embeddings.create(model=EMBEDDING_MODEL, input=part)
+        out.extend([d.embedding for d in resp.data])
+    return out
 
-def query(col, text, k=5):
-    """Safe query that won’t crash on API differences."""
-    if not col or not text:
-        return []
-    try:
-        res = col.query(
-            query_texts=[text],
-            n_results=max(1, k),
-            include=["documents", "metadatas", "ids"]
-        )
-        docs = (res.get("documents") or [[]])[0]
-        ids = (res.get("ids") or [[]])[0]
-        metas = (res.get("metadatas") or [[{}]])[0]
-        output = []
-        for i, doc in enumerate(docs):
-            output.append({
-                "id": ids[i] if i < len(ids) else f"auto-{i}",
-                "text": doc,
-                "metadata": metas[i] if i < len(metas) else {}
-            })
-        return output
-    except Exception as e:
-        print(f"[Warning] Query failed: {e}")
-        return []
+def upsert_chunks(topic_id: str, texts: List[str], metadatas: List[Dict[str,Any]]) -> None:
+    if not texts: return
+    embs = embed(texts)
+    with _conn() as c:
+        for t, m, e in zip(texts, metadatas, embs):
+            c.execute(
+                "INSERT OR REPLACE INTO docs(id, topic_id, text, meta, embedding) VALUES(?,?,?,?,?)",
+                (str(uuid.uuid4()), topic_id, t, json.dumps(m or {}), json.dumps(e))
+            )
+        c.commit()
+
+def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    na = np.linalg.norm(a); nb = np.linalg.norm(b)
+    if na == 0 or nb == 0: return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+def query(topic_id: str, text: str, k: int = 5) -> List[Dict[str,Any]]:
+    q = embed([text])[0]
+    qv = np.array(q, dtype=np.float32)
+
+    with _conn() as c:
+        rows = c.execute("SELECT text, meta, embedding FROM docs WHERE topic_id = ?", (topic_id,)).fetchall()
+
+    scored: List[Tuple[float, Dict[str,Any]]] = []
+    for t, meta_json, emb_json in rows:
+        ev = np.array(json.loads(emb_json), dtype=np.float32)
+        score = _cos(qv, ev)
+        scored.append((score, {"text": t, "meta": json.loads(meta_json or "{}")}))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for s, item in scored[:k]:
+        m = item["meta"] or {}
+        out.append({
+            "text": item["text"],
+            "score": s,
+            "url": m.get("url", ""),
+            "domain": m.get("domain", "")
+        })
+    return out
+
+# convenience used by your researcher
+def upsert_chunks_simple(topic_id: str, chunks: List[Dict[str,Any]]):
+    texts = [c["text"] for c in chunks]
+    metas = [c.get("meta", {}) for c in chunks]
+    upsert_chunks(topic_id, texts, metas)
