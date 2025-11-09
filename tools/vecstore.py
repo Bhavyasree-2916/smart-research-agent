@@ -1,79 +1,169 @@
-import os, json, sqlite3, uuid, math
-import numpy as np
-from typing import List, Dict, Any, Tuple
-from config import EMBEDDING_MODEL, OPENAI_API_KEY
+# tools/vecstore.py
+# Minimal vector store with optional Chroma and robust OpenAI embeddings.
+# - If chromadb is installed: uses a persistent DB (./.chroma)
+# - Otherwise: falls back to a simple in-memory store per topic_id
+# - Uses OpenAI >= 1.3x style client and text-embedding-3-small by default
+
+from __future__ import annotations
+
+import os
+import time
+import math
+import uuid
+from typing import List, Dict, Any, Optional
+
+# ---------- OpenAI client (new SDK) ----------
 from openai import OpenAI
+client = OpenAI()  # reads OPENAI_API_KEY from env/Streamlit secrets
 
-DB_PATH = os.environ.get("RAG_DB_PATH", "store.sqlite3")
-client = OpenAI(api_key=OPENAI_API_KEY)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-def _conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS docs(
-            id TEXT PRIMARY KEY,
-            topic_id TEXT,
-            text TEXT,
-            meta TEXT,
-            embedding TEXT  -- store as JSON list for portability
-        )
-    """)
-    conn.commit()
-    return conn
+def _embed_once(text: str) -> List[float]:
+    resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text, timeout=30)
+    return resp.data[0].embedding
 
-def embed(texts: List[str]) -> List[List[float]]:
-    # batch to be polite
+def embed(text: str, retries: int = 3, backoff: float = 2.0) -> List[float]:
+    last_err = None
+    for i in range(retries):
+        try:
+            return _embed_once(text)
+        except Exception as e:
+            last_err = e
+            time.sleep(backoff * (i + 1))
+    raise last_err
+
+
+# ---------- Optional Chroma backend ----------
+_CHROMA_OK = True
+try:
+    import chromadb  # type: ignore
+    from chromadb.utils import embedding_functions  # noqa: F401 (kept for compatibility)
+except Exception:
+    _CHROMA_OK = False
+
+
+# ---------- Simple in-memory fallback ----------
+# Structure: _MEM[topic_id] = {"ids": [], "embs": [[...]], "texts": [], "metas": []}
+_MEM: Dict[str, Dict[str, List[Any]]] = {}
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b:
+        return 0.0
+    s = sum(x*y for x, y in zip(a, b))
+    na = math.sqrt(sum(x*x for x in a))
+    nb = math.sqrt(sum(y*y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return s / (na * nb)
+
+
+# ---------- Public API ----------
+def get_store(topic_id: str):
+    """
+    Returns a collection-like object with:
+      - upsert(texts, metadatas, ids)
+      - query(query_texts=[...], n_results=k) -> dict
+    """
+    if _CHROMA_OK:
+        client_chroma = chromadb.PersistentClient(path=os.path.abspath("./.chroma"))
+        return _ChromaCollection(client_chroma, topic_id)
+    else:
+        # ensure mem bucket
+        _MEM.setdefault(topic_id, {"ids": [], "embs": [], "texts": [], "metas": []})
+        return _MemCollection(topic_id)
+
+
+def upsert_chunks(topic_id: str, texts: List[str], metadatas: List[Dict[str, Any]]) -> None:
+    """
+    Embeds + writes chunks into the vector store for this topic_id.
+    """
+    if not texts:
+        return
+
+    # make ids stable if provided inside metadata; otherwise random
+    ids = []
+    for m in metadatas:
+        ids.append(m.get("id") or str(uuid.uuid4()))
+
+    vs = get_store(topic_id)
+
+    # embed in a simple loop (Streamlit Cloud prefers small batches)
+    embs = [embed(t) for t in texts]
+    vs.upsert(texts=texts, metadatas=metadatas, ids=ids, embeddings=embs)
+
+
+def rag_query(topic_id: str, query: str, k: int = 8) -> List[Dict[str, Any]]:
+    """
+    Returns top-k context items as a list of {text, metadata}
+    """
+    vs = get_store(topic_id)
+    res = vs.query(query_texts=[query], n_results=k)
     out = []
-    batch = 50
-    for i in range(0, len(texts), batch):
-        part = texts[i:i+batch]
-        resp = client.embeddings.create(model=EMBEDDING_MODEL, input=part)
-        out.extend([d.embedding for d in resp.data])
-    return out
-
-def upsert_chunks(topic_id: str, texts: List[str], metadatas: List[Dict[str,Any]]) -> None:
-    if not texts: return
-    embs = embed(texts)
-    with _conn() as c:
-        for t, m, e in zip(texts, metadatas, embs):
-            c.execute(
-                "INSERT OR REPLACE INTO docs(id, topic_id, text, meta, embedding) VALUES(?,?,?,?,?)",
-                (str(uuid.uuid4()), topic_id, t, json.dumps(m or {}), json.dumps(e))
-            )
-        c.commit()
-
-def _cos(a: np.ndarray, b: np.ndarray) -> float:
-    na = np.linalg.norm(a); nb = np.linalg.norm(b)
-    if na == 0 or nb == 0: return 0.0
-    return float(np.dot(a, b) / (na * nb))
-
-def query(topic_id: str, text: str, k: int = 5) -> List[Dict[str,Any]]:
-    q = embed([text])[0]
-    qv = np.array(q, dtype=np.float32)
-
-    with _conn() as c:
-        rows = c.execute("SELECT text, meta, embedding FROM docs WHERE topic_id = ?", (topic_id,)).fetchall()
-
-    scored: List[Tuple[float, Dict[str,Any]]] = []
-    for t, meta_json, emb_json in rows:
-        ev = np.array(json.loads(emb_json), dtype=np.float32)
-        score = _cos(qv, ev)
-        scored.append((score, {"text": t, "meta": json.loads(meta_json or "{}")}))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    out = []
-    for s, item in scored[:k]:
-        m = item["meta"] or {}
+    # normalize to list-of-dicts
+    for i in range(len(res["documents"][0])):
         out.append({
-            "text": item["text"],
-            "score": s,
-            "url": m.get("url", ""),
-            "domain": m.get("domain", "")
+            "text": res["documents"][0][i],
+            "metadata": res["metadatas"][0][i]
         })
     return out
 
-# convenience used by your researcher
-def upsert_chunks_simple(topic_id: str, chunks: List[Dict[str,Any]]):
-    texts = [c["text"] for c in chunks]
-    metas = [c.get("meta", {}) for c in chunks]
-    upsert_chunks(topic_id, texts, metas)
+
+# ---------- Backends ----------
+class _ChromaCollection:
+    def __init__(self, client_chroma, topic_id: str):
+        self._col = client_chroma.get_or_create_collection(name=f"topic_{topic_id}")
+
+    def upsert(self, texts, metadatas, ids, embeddings):
+        self._col.upsert(
+            ids=ids,
+            documents=texts,
+            metadatas=metadatas,
+            embeddings=embeddings
+        )
+
+    def query(self, query_texts: List[str], n_results: int = 8) -> Dict[str, Any]:
+        # embed the query ourselves for consistency/retry control
+        q_emb = [embed(query_texts[0])]
+        res = self._col.query(query_embeddings=q_emb, n_results=n_results)
+        # Chroma returns keys: ids, distances, documents, metadatas
+        return {
+            "ids": res.get("ids", [[]]),
+            "documents": res.get("documents", [[]]),
+            "metadatas": res.get("metadatas", [[]]),
+            "distances": res.get("distances", [[]]),
+        }
+
+
+class _MemCollection:
+    def __init__(self, topic_id: str):
+        self._bucket = _MEM[topic_id]
+
+    def upsert(self, texts, metadatas, ids, embeddings):
+        self._bucket["ids"].extend(ids)
+        self._bucket["texts"].extend(texts)
+        self._bucket["metas"].extend(metadatas)
+        self._bucket["embs"].extend(embeddings)
+
+    def query(self, query_texts: List[str], n_results: int = 8) -> Dict[str, Any]:
+        q = embed(query_texts[0])
+        sims = [(_cosine(q, e), i) for i, e in enumerate(self._bucket["embs"])]
+        sims.sort(reverse=True)
+        take = sims[:n_results]
+
+        docs = []
+        metas = []
+        ids = []
+        dists = []
+        for score, idx in take:
+            docs.append(self._bucket["texts"][idx])
+            metas.append(self._bucket["metas"][idx])
+            ids.append(self._bucket["ids"][idx])
+            # convert similarity to pseudo-distance
+            dists.append(1.0 - score)
+
+        return {
+            "ids": [ids],
+            "documents": [docs],
+            "metadatas": [metas],
+            "distances": [dists],
+        }
