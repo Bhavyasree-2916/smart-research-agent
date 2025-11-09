@@ -10,6 +10,7 @@ textstat==0.7.3
 # --- Lightweight vector DB ---
 chromadb==0.4.24
 pydantic==1.10.13
+numpy==1.26.4          # <- pin to avoid np.float/np.int AttributeError
 
 # --- Cloud (optional) ---
 supabase==2.6.0
