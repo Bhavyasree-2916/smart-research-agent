@@ -1,22 +1,17 @@
-# --- Core Streamlit ---
+pip==24.2
 streamlit==1.38.0
 openai==1.30.1
 requests==2.32.3
 python-dotenv==1.0.1
-
-# --- Text analysis ---
 textstat==0.7.3
-
-# --- Lightweight vector store ---
 chromadb==0.4.24
+numpy==1.26.4
 pydantic==1.10.13
-
-# --- Supabase support ---
 supabase==1.0.3
 postgrest==0.13.0
 gotrue==0.10.0
 realtime==1.0.0
 storage3==0.6.0
-
-# --- SQLite fallback ---
-pysqlite3-binary==0.5.2.post5
+setuptools<70
+wheel
+typing-extensions==4.12.2
