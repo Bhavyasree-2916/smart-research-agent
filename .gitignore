@@ -17,3 +17,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 EOF
+.chroma/
+*,sqlite3
+.venv/
+__pycache__/
