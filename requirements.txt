@@ -1,16 +1,18 @@
-# Core
+# --- Core Streamlit & APIs ---
 streamlit==1.38.0
+openai==1.30.1
 requests==2.32.3
 python-dotenv==1.0.1
+
+# --- Text analysis / validation ---
 textstat==0.7.3
 
-# LLM + vector store (no torch!)
-openai==1.30.1
+# --- Lightweight vector store (no torch required) ---
 chromadb==0.4.24
 pydantic==1.10.13
 
-# Optional cloud save
+# --- Optional cloud integration ---
 supabase==2.6.0
 
-# Sometimes needed on Streamlit’s image
+# --- SQLite support for ChromaDB ---
 pysqlite3-binary==0.5.2.post3
