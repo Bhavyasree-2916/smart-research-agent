@@ -1,43 +1,45 @@
-# tools/cloud.py
 import os
-from supabase import create_client
 
-def is_configured():
-    return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY"))
-
-def _client():
+def _maybe_client():
+    """Create Supabase client if secrets exist."""
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
-    return create_client(url, key)
-
-def save_run(topic_title, brief, quiz):
-    if not is_configured():
+    if not url or not key:
         return None
-    sb = _client()
+    try:
+        from supabase import create_client
+        return create_client(url, key)
+    except Exception as e:
+        print("⚠️ Supabase client not configured:", e)
+        return None
 
-    topic = (sb.table("topics")
-               .insert({"title": topic_title})
-               .select("id,title")
-               .single()
-               .execute()).data
 
-    brief_row = (sb.table("briefs")
-                   .insert({
-                       "topic_id": topic["id"],
-                       "summary_md": brief.get("brief",""),
-                       "citations": brief.get("citations", [])
-                   })
-                   .select("id,topic_id")
-                   .single()
-                   .execute()).data
+def is_configured():
+    """Return True if Supabase is properly configured."""
+    return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY"))
 
-    quiz_row = (sb.table("quizzes")
-                  .insert({
-                      "topic_id": topic["id"],
-                      "questions": quiz
-                  })
-                  .select("id,topic_id")
-                  .single()
-                  .execute()).data
 
-    return {"topic": topic, "brief": brief_row, "quiz": quiz_row}
+def save_run(run_data: dict):
+    """Save a run record to Supabase (if configured)."""
+    client = _maybe_client()
+    if not client:
+        return None
+    try:
+        client.table("runs").insert(run_data).execute()
+    except Exception as e:
+        print("⚠️ Supabase insert failed:", e)
+
+
+def load_brief(topic_id: str):
+    """Load a brief record from Supabase (if configured)."""
+    client = _maybe_client()
+    if not client:
+        return None
+    try:
+        result = client.table("briefs").select("*").eq("topic_id", topic_id).execute()
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        print("⚠️ Supabase fetch failed:", e)
+        return None
