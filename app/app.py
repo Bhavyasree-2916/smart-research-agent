@@ -92,7 +92,7 @@ if run_btn and topic.strip():
 
         # 4) QUIZ
         s.update(label="Generating quiz…")
-        quiz = make_quiz(brief["brief"])
+        quiz = make_quiz(brief["brief"],topic=topic,n=5)
         
         metrics = validate_brief(brief["brief"], brief["citations"])
 
@@ -114,7 +114,7 @@ if run_btn and topic.strip():
             brief = synthesize_brief(topic, sources, topic_id=topic_id)
             metrics = validate_brief(brief["brief"], brief["citations"])
         if not metrics["passed"]:
-            quiz = make_quiz(brief["brief"])
+            quiz = make_quiz(brief["brief"],topic=topic,n=5)
 
         # 5) SAVE to session
         st.session_state.results = {
