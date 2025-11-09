@@ -1,43 +1,43 @@
 # tools/cloud.py
 import os
-from typing import Optional, Dict, Any
-try:
-    from supabase import create_client, Client
-except Exception:
-    create_client = None
-    Client = None  # type: ignore
+from supabase import create_client
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+def is_configured():
+    return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY"))
 
-_client: Optional["Client"] = None
-if SUPABASE_URL and SUPABASE_ANON_KEY and create_client:
-    _client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+def _client():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    return create_client(url, key)
 
-def save_run(topic: str, brief: Dict[str, Any], quiz: Any) -> Optional[Dict[str, Any]]:
-    """
-    Inserts a row in topics + briefs. Returns IDs for sharing.
-    If Supabase isn't configured, returns None.
-    """
-    if not _client:
+def save_run(topic_title, brief, quiz):
+    if not is_configured():
         return None
-    t = _client.table("topics").insert({"title": topic}).execute().data[0]
-    b = _client.table("briefs").insert({
-        "topic_id": t["id"],
-        "summary_md": brief.get("brief", ""),
-        "citations": brief.get("citations", []),
-        "quiz": quiz
-    }).execute().data[0]
-    return {"topic": t, "brief": b}
-# tools/cloud.py (add at the bottom)
+    sb = _client()
 
-def is_configured() -> bool:
-    return client is not None
+    topic = (sb.table("topics")
+               .insert({"title": topic_title})
+               .select("id,title")
+               .single()
+               .execute()).data
 
-def load_brief(brief_id: str):
-    """Fetch a single brief row by id. Returns dict or None."""
-    if not client: 
-        return None
-    res = client.table("briefs").select("*").eq("id", brief_id).execute()
-    data = res.data
-    return data[0] if data else None
+    brief_row = (sb.table("briefs")
+                   .insert({
+                       "topic_id": topic["id"],
+                       "summary_md": brief.get("brief",""),
+                       "citations": brief.get("citations", [])
+                   })
+                   .select("id,topic_id")
+                   .single()
+                   .execute()).data
+
+    quiz_row = (sb.table("quizzes")
+                  .insert({
+                      "topic_id": topic["id"],
+                      "questions": quiz
+                  })
+                  .select("id,topic_id")
+                  .single()
+                  .execute()).data
+
+    return {"topic": topic, "brief": brief_row, "quiz": quiz_row}
