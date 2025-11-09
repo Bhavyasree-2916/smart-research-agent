@@ -2,3 +2,22 @@ pip==24.2
 streamlit==1.38.0
 openai==1.30.1
 requests==2.32.3
+python-dotenv==1.0.1
+textstat==0.7.3
+
+# Core vector + data tools
+chromadb==0.4.24
+pydantic==1.10.13
+typing-extensions==4.12.2
+numpy==1.26.4
+
+# Supabase dependencies
+supabase==1.0.3
+postgrest==0.13.0
+gotrue==0.10.0
+realtime==1.0.0
+storage3==0.6.0
+
+# For packaging and install consistency
+setuptools<70
+wheel
