@@ -167,3 +167,12 @@ class _MemCollection:
             "metadatas": [metas],
             "distances": [dists],
         }
+def get_chroma():
+    import chromadb
+    from chromadb.api.client import Client as ClientCreator
+    return ClientCreator()
+
+def embed(texts):
+    from openai import OpenAI
+    client = OpenAI()
+    return client.embeddings.create(model=EMBEDDING_MODEL, input=texts).data
