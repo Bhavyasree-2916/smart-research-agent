@@ -1,6 +1,7 @@
 # app/app.py
 # Smart Research → Brief → Quiz (Streamlit)
 # Safe to run on Streamlit Cloud. Optional Supabase is handled gracefully.
+from __future__ import annotations
 import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
