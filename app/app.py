@@ -7,7 +7,6 @@ import streamlit as st
 from typing import List, Dict, Any
 
 # ---------- PATH FIX ----------
-# Ensure Streamlit can import local modules (agents/, tools/, etc.)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(APP_DIR)
 if PROJECT_ROOT not in sys.path:
@@ -66,6 +65,7 @@ with tab_research:
                 try:
                     results = research_from_web(topic, n=n_sources)
                     st.session_state["research_sources"] = results
+                    st.session_state["topic_name"] = topic
                 except Exception as e:
                     st.error("Research agent failed.")
                     st.code(traceback.format_exc())
@@ -80,7 +80,9 @@ with tab_research:
 # ============================================
 with tab_brief:
     st.header("🧾 Generate Research Brief")
-    text_topic = st.text_input("Topic ID (optional, for Supabase)", placeholder="Leave blank if not saving")
+    topic_name = st.session_state.get("topic_name", "")
+    topic_input = st.text_input("Enter topic name", value=topic_name, placeholder="e.g., Impact of AI in healthcare")
+
     if st.button("🧠 Synthesize Brief"):
         with st.spinner("Synthesizing summary and citations..."):
             try:
@@ -88,9 +90,10 @@ with tab_brief:
                 if not sources:
                     st.warning("Please run the Research tab first.")
                 else:
-                    result = synthesize_brief(topic=text_topic or "Untitled", sources=sources)
+                    result = synthesize_brief(topic=topic_input, sources=sources)
                     st.session_state["brief"] = result.get("brief", "")
                     st.session_state["citations"] = result.get("citations", [])
+                    st.session_state["topic_name"] = topic_input
             except Exception:
                 st.error("Brief synthesis failed.")
                 st.code(traceback.format_exc())
