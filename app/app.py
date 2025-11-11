@@ -1,174 +1,209 @@
 # app/app.py
+# Smart Research → Brief → Quiz (Streamlit)
+# Safe to run on Streamlit Cloud. Optional Supabase is handled gracefully.
 
-# --- make sure Python can import ../agents and ../tools ---
-import sys, os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from __future__ import annotations
 
+import os
 import uuid
+from typing import Dict, List, Any
+
 import streamlit as st
 
-# project imports
-from agents.planner import plan_queries
-from agents.researcher import research_from_web
-from agents.synthesizer import synthesize_brief
-from agents.quiz import make_quiz
-from tools.cloud import save_run  # returns None if Supabase not configured
-from tools.validation import validate_brief
-from tools.cloud import save_run, is_configured, load_brief
+# ========= Optional cloud (Supabase) =========
+# If tools.cloud is not present or not configured, we fall back to no-ops.
+try:
+    from tools.cloud import save_run, is_configured, load_brief  # type: ignore
+except Exception:
+    def save_run(*args, **kwargs):
+        return None
+    def is_configured() -> bool:
+        return False
+    def load_brief(*args, **kwargs):
+        return None
 
-# ------------------ UI CONFIG ------------------
-st.set_page_config(page_title="Smart Research Agent", page_icon="🧠", layout="centered")
-st.markdown(
-    "<h2 style='text-align:center;'>🧠 Smart Research → Brief → Quiz Agent</h2>",
-    unsafe_allow_html=True,
+# ========= Agents & tools (required) =========
+# These should exist in your repo.
+from agents.researcher import research_from_web  # -> List[Dict]
+from agents.synthesizer import synthesize_brief   # -> Dict[brief, citations]
+from agents.quiz import generate_quiz             # -> List[Dict]
+# Optional readability validation (won't fail if missing)
+try:
+    from tools.validation import flesch_kincaid_grade
+except Exception:
+    def flesch_kincaid_grade(text: str) -> float:
+        return 0.0
+
+
+# ========= Page config =========
+st.set_page_config(
+    page_title="Smart Research Agent",
+    page_icon="🧠",
+    layout="wide",
 )
-st.caption("Enter a topic. The agent plans queries, researches Wikipedia, writes a brief, and makes a quiz.")
-# --- Share view: open a saved brief via URL param (?brief_id=...)
-qp = st.query_params
-if "brief_id" in qp and is_configured():
-    bid = qp["brief_id"][0]
-    data = load_brief(bid)
-    if data:
-        st.success("Loaded shared brief ✅")
-        st.subheader("📌 Brief")
-        st.markdown(data["summary_md"] or "")
-        st.subheader("🔗 Citations")
-        cites = data.get("citations") or []
-        if not cites:
-            st.caption("No citations available.")
-        else:
-            for c in cites:
-                url = c.get("url","")
-                dom = c.get("domain","")
-                if url:
-                    st.markdown(f"- [{dom or url}]({url})")
-        st.info("Tip: Replace the brief_id in the URL to load another result.")
-        st.stop()  # don't render input UI on this share page
-with st.sidebar:
-    st.header("ℹ️ About")
-    st.write(
-        "Multi-agent research app:\n"
-        "• Planner → sub-queries\n"
-        "• Researcher → fetch & chunk\n"
-        "• Synthesizer → brief with citations\n"
-        "• Quiz → 5 MCQs"
+
+st.title("🧠 Smart Research → Brief → Quiz Agent")
+
+with st.expander("About", expanded=False):
+    st.markdown(
+        "- Enter a topic. The agent plans sub-queries, researches Wikipedia/web, writes a brief, and makes a quiz.\n"
+        "- Use **Sources per subquery** to control how many citations are pulled for each subtopic.\n"
+        "- If Supabase is configured in *Manage app → Settings → Secrets*, runs will be saved."
     )
-    st.divider()
-    st.subheader("Share")
-    st.write("After a run is saved, use the brief link shown in the results.")
-    st.caption("Tip: You can also open a saved brief with `?brief_id=<ID>`.")
 
-# ------------------ STATE ------------------
-if "results" not in st.session_state:
-    st.session_state.results = None
+# ========= Sidebar controls =========
+with st.sidebar:
+    st.header("Controls")
+    topic = st.text_input(
+        "Topic",
+        placeholder="e.g., LLM agents in healthcare",
+        value=st.session_state.get("last_topic", ""),
+    )
+    sources_per_subquery = st.slider(
+        "Sources per subquery",
+        min_value=1, max_value=10, value=3, step=1,
+        help="How many sources to fetch per subtopic"
+    )
+    num_quiz_questions = st.slider(
+        "Quiz questions",
+        min_value=3, max_value=10, value=5, step=1
+    )
 
-# ------------------ INPUTS ------------------
-topic = st.text_input("Topic", value="LLM agents in healthcare")
-col1, col2 = st.columns([1, 1])
-with col1:
-    per_query = st.slider("Sources per subquery", 1, 3, 1)
-with col2:
-    run_btn = st.button("Run Agent", type="primary")
+    # Session-scoped topic_id
+    if "topic_id" not in st.session_state or st.session_state.get("last_topic") != topic:
+        st.session_state.topic_id = str(uuid.uuid4())
+        st.session_state.last_topic = topic
+    topic_id = st.session_state.topic_id
 
-# ------------------ PIPELINE ------------------
+    st.caption(f"Topic ID: `{topic_id}`")
+    run_btn = st.button("Run Agent", type="primary", use_container_width=True)
+
+# ========= Guard clauses =========
+if run_btn and not topic.strip():
+    st.warning("Please enter a topic and click **Run Agent**.")
+    st.stop()
+
+# ========= Main run =========
 if run_btn and topic.strip():
-    # A stable UUID derived from the topic text (so re-runs hit same vector collection)
-    topic_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, topic))
+    # Step 1: Research
+    with st.spinner("🔎 Researching…"):
+        try:
+            sources: List[Dict[str, Any]] = research_from_web(
+                topic=topic.strip(),
+                n_sources=sources_per_subquery
+            )
+        except Exception as e:
+            st.error(f"Research step failed: {e}")
+            st.stop()
 
-    with st.status("Planning…", expanded=False) as s:
-        # 1) PLAN
-        
-        subqs = plan_queries(topic)
-        st.write(subqs)
-
-        # 2) RESEARCH (fetch + chunk + upsert to vector store)
-        s.update(label="Researching sources…")
-        sources = research_from_web(subqs, per_query=per_query, topic_id=topic_id, topic=topic)
-
-
-        # 3) SYNTHESIZE (RAG → brief + citations)
-        s.update(label="Synthesizing brief…")
-        with st.spinner("Summarizing from retrieved context…"):
-            result = synthesize_brief(topic, sources_per_subquery, topic_id=topic_id)
-            brief = result.get("brief", "")
-            citations = result.get("citations", [])
-
-        # 4) QUIZ
-        s.update(label="Generating quiz…")
-        quiz = make_quiz(brief["brief"],topic=topic,n=5)
-        
-        metrics = validate_brief(brief["brief"], brief["citations"])
-
-        st.subheader("✅ Validation")
-        colA, colB, colC = st.columns(3)
-        colA.metric("Word count", metrics["word_count"], "target 250–350")
-        colB.metric("Unique domains", metrics["unique_domains"], "≥ 3")
-        colC.metric("Readability (FK grade)", metrics["readability_grade"], "≤ 10")
-
-        if metrics["passed"]:
-            st.success("Brief passed quality checks.")
+    # Show sources
+    with st.expander("Sources", expanded=False):
+        if not sources:
+            st.info("No sources returned.")
         else:
-            st.warning("Brief failed quality checks (length/sources/readability). "
-               "Try increasing 'sources per subquery' or a broader topic.")
-    # Simple retry: ask for more sources and rerun synth
-            more_sources = research_from_web(subqs, per_query=max(2, per_query + 1),
-                                     topic_id=topic_id, topic=topic)
-            sources = sources + more_sources
-            brief = synthesize_brief(topic, sources, topic_id=topic_id)
-            metrics = validate_brief(brief["brief"], brief["citations"])
-        if not metrics["passed"]:
-            quiz = make_quiz(brief["brief"],topic=topic,n=5)
+            for i, s in enumerate(sources, 1):
+                title = s.get("title") or "Untitled"
+                url = s.get("url") or ""
+                st.markdown(f"**{i}. {title}**  \n{url}")
 
-        # 5) SAVE to session
-        st.session_state.results = {
-            "topic": topic,
-            "topic_id": topic_id,
-            "subqs": subqs,
-            "sources": sources,
-            "brief": brief,
-            "quiz": quiz,
-        }
+    # Step 2: Synthesize brief
+    with st.spinner("🧵 Synthesizing brief…"):
+        try:
+            result: Dict[str, Any] = synthesize_brief(
+                topic=topic.strip(),
+                sources=sources,
+                topic_id=topic_id,
+                k=15,  # retrieval size; your synthesizer can ignore if unused
+            )
+        except Exception as e:
+            st.error(f"Synthesis step failed: {e}")
+            st.stop()
 
-        # 6) OPTIONAL: Save to Supabase (only if SUPABASE_URL/KEY set)
-        saved = save_run(topic, brief, quiz)
-        if saved:
-            st.success("Saved to Supabase ✅")
-            st.caption(f"Topic ID: {saved['topic']['id']}")
-            st.caption(f"Brief ID: {saved['brief']['id']}")
-        else:
-            st.info("Skipping cloud save (Supabase not configured).")
+    brief: str = (result or {}).get("brief", "").strip()
+    citations: List[Dict[str, Any]] = (result or {}).get("citations", [])
 
-        s.update(label="Done!", state="complete")
+    if not brief:
+        st.error("No brief produced. Check your OpenAI key and network, then try again.")
+        st.stop()
 
-# ------------------ OUTPUT RENDER ------------------
-# ------------------ OUTPUT RENDER ------------------
-res = st.session_state.results
-if res:
-    st.subheader("Results")
+    # Optional: readability
+    grade = 0.0
+    try:
+        grade = flesch_kincaid_grade(brief)
+    except Exception:
+        pass
 
-    with st.expander("📌 Brief", expanded=True):
-        st.markdown(res["brief"]["brief"])
+    st.subheader("📝 Brief")
+    st.write(brief)
+    st.caption(f"Readability (Flesch-Kincaid grade): {grade:.1f}")
 
-    with st.expander("🔗 Citations", expanded=True):
-        cites = res["brief"]["citations"]
-        if cites:
-            for c in cites:
-                url = c.get("url", "")
-                dom = c.get("domain", "")
-                if url:
-                    st.markdown(f"- [{dom or 'source'}]({url})")
-        else:
-            st.caption("No citations available.")
+    st.subheader("🔗 Citations")
+    if citations:
+        for i, c in enumerate(citations, 1):
+            label = c.get("title") or c.get("source") or "Source"
+            url = c.get("url") or ""
+            st.markdown(f"{i}. **{label}**  \n{url}")
+    else:
+        st.info("No citations returned by the synthesizer.")
 
-    with st.expander("📝 Quiz", expanded=True):
-        score = 0
-        for i, q in enumerate(res["quiz"]):
-            st.markdown(f"**Q{i+1}. {q['q']}**")
-            choice = st.radio("", q["options"], key=f"q{i}", index=None, horizontal=False)
-            if choice is not None:
-                correct = q["options"][q["answer_index"]]
-                if choice == correct:
-                    score += 1
-                st.caption(f"Answer: **{correct}** — {q.get('explanation', '')}")
-            st.divider()
-        st.success(f"Your score (so far): {score} / {len(res['quiz'])}")
+    # Step 3: Quiz
+    with st.spinner("🧪 Generating quiz…"):
+        try:
+            quiz: List[Dict[str, Any]] = generate_quiz(
+                brief_text=brief,
+                n=num_quiz_questions
+            )
+        except Exception as e:
+            st.error(f"Quiz step failed: {e}")
+            st.stop()
+
+    st.subheader("❓ Quiz")
+    if not quiz:
+        st.info("No quiz generated.")
+    else:
+        # Render MCQs, ensure unique questions
+        asked = set()
+        for idx, q in enumerate(quiz, 1):
+            qtext = (q.get("question") or "").strip()
+            if not qtext or qtext.lower() in asked:
+                continue
+            asked.add(qtext.lower())
+
+            with st.container(border=True):
+                st.markdown(f"**Q{idx}. {qtext}**")
+                options = q.get("options") or []
+                key = f"q_{idx}_{uuid.uuid4().hex[:6]}"
+                st.radio(" ", options, key=key, label_visibility="collapsed")
+
+    # Optional: save to Supabase (if configured)
+    if is_configured():
+        try:
+            save_run(
+                topic_id=topic_id,
+                title=topic.strip(),
+                brief=brief,
+                citations=citations,
+                sources=sources,
+                quiz=quiz,
+            )
+            st.success("Run saved to Supabase.")
+        except Exception:
+            st.warning("Supabase configured but save failed. Check your credentials/logs.")
+
+# ========= Footer =========
+st.divider()
+st.caption(
+    "Tip: You can open a saved brief (when Supabase is configured) via its Topic ID."
+)
+load_col1, load_col2 = st.columns([3, 1])
+with load_col1:
+    load_id = st.text_input("Load brief by Topic ID", placeholder="paste a topic_id")
+with load_col2:
+    load_btn = st.button("Load")
+if load_btn and load_id.strip() and is_configured():
+    data = load_brief(load_id.strip())
+    if not data:
+        st.error("No record found for that Topic ID.")
+    else:
+        st.success("Loaded!")
+        st.write(data.get("brief", ""))
