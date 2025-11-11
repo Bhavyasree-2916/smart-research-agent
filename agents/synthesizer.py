@@ -1,31 +1,55 @@
 # agents/synthesizer.py
-from typing import List, Dict
-import textwrap
-from config import OPENAI_API_KEY, MODEL_MAIN
-from tools.vecstore import query as rag_query  # ✅ only this import
+from __future__ import annotations
+from typing import List, Tuple, Dict, Any
+from openai import OpenAI
+from tools.vecstore import rag_query
+from config import MODEL_SMALL  # e.g., "gpt-4o-mini"
 
-def _llm_summarize(context_blobs: List[Dict], topic: str) -> str:
-    if not OPENAI_API_KEY:
-        joined = " ".join([c["text"][:300] for c in context_blobs])[:2000]
-        return textwrap.shorten(f"{topic}: {joined}", width=900, placeholder="...")
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    cites = "\n".join([f"[{i+1}] {c['metadata'].get('url','')}" for i,c in enumerate(context_blobs)])
-    prompt = f"""Write a 250–350 word brief about: {topic}.
-Use simple language (grade <= 10).
-Cite with [1], [2], ... mapping to these sources:
-{cites}
-Base your answer ONLY on the provided context.
-"""
-    msg = client.chat.completions.create(
-        model=MODEL_MAIN,
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.3,
+client = OpenAI()
+
+def _normalize_ctx(ctx: Any) -> List[Dict[str, Any]]:
+    """
+    Ensure we always return a list of dicts with at least: {'chunk': <text>, 'meta': {...}}
+    Accepts lists of strings, dicts, or any mix.
+    """
+    normalized: List[Dict[str, Any]] = []
+    if not ctx:
+        return normalized
+    for item in ctx:
+        if isinstance(item, dict):
+            text = item.get("chunk") or item.get("text") or item.get("content") or ""
+            meta = {k: v for k, v in item.items() if k not in {"chunk", "text", "content"}}
+            normalized.append({"chunk": str(text), "meta": meta})
+        else:
+            normalized.append({"chunk": str(item), "meta": {}})
+    return normalized
+
+def synthesize_brief(topic: str, sources: int, topic_id: str | None = None) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Returns (brief, citations) — a tuple.
+    - brief: synthesized summary as a string
+    - citations: the retrieved context items (normalized list of dicts)
+    """
+    # rag_query should be defined as rag_query(topic_id: str, query_text: str, k: int = 8)
+    # If your signature is rag_query(query_text, k=8, topic_id=None) swap the first two args.
+    ctx = rag_query(topic_id or "default", topic, k=15)
+
+    citations = _normalize_ctx(ctx)
+    context_text = "\n\n".join(c["chunk"] for c in citations)[:12000]  # keep prompt reasonable
+
+    system = (
+        "You are a careful research assistant. Write a concise brief (6–10 bullet points) based ONLY on the provided context. "
+        "If something is not in the context, do not invent it."
     )
-    return msg.choices[0].message.content.strip()
+    user = f"Topic: {topic}\n\nContext:\n{context_text}\n\nWrite the brief now."
 
-def synthesize_brief(topic: str, sources: int, topic_id: str = None):
-    ctx = rag_query(topic_id, topic, k=15)
-    brief = make_brief(topic, ctx)  # whatever you call your summarizer
-    citations = ctx                  # or extract only what you need
+    resp = client.chat.completions.create(
+        model=MODEL_SMALL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.2,
+    )
+    brief = resp.choices[0].message.content.strip()
     return brief, citations
