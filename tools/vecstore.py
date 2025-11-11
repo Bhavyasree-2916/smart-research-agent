@@ -1,178 +1,151 @@
 # tools/vecstore.py
-# Minimal vector store with optional Chroma and robust OpenAI embeddings.
-# - If chromadb is installed: uses a persistent DB (./.chroma)
-# - Otherwise: falls back to a simple in-memory store per topic_id
-# - Uses OpenAI >= 1.3x style client and text-embedding-3-small by default
+# Lightweight, dependency-free vector store for Streamlit Cloud.
+# Stores embeddings in-memory and uses OpenAI for embedding generation.
 
 from __future__ import annotations
 
 import os
-import time
 import math
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
-# ---------- OpenAI client (new SDK) ----------
-from openai import OpenAI
-client = OpenAI()  # reads OPENAI_API_KEY from env/Streamlit secrets
+# --- OpenAI client setup ------------------------------------------------------
+# OpenAI's Python SDK looks for OPENAI_API_KEY.
+# Your secrets may be stored as OPEN_API_KEY, so we mirror it if needed.
+if "OPENAI_API_KEY" not in os.environ and os.getenv("OPEN_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = os.getenv("OPEN_API_KEY")
+
+from openai import OpenAI  # openai==1.x
+client = OpenAI()
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-def _embed_once(text: str) -> List[float]:
-    resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text, timeout=30)
-    return resp.data[0].embedding
-
-def embed(text: str, retries: int = 3, backoff: float = 2.0) -> List[float]:
-    last_err = None
-    for i in range(retries):
-        try:
-            return _embed_once(text)
-        except Exception as e:
-            last_err = e
-            time.sleep(backoff * (i + 1))
-    raise last_err
+# --- In-memory store ----------------------------------------------------------
+# Each record: {id, topic_id, source, text, embedding(List[float])}
+_STORE: List[Dict[str, Any]] = []
 
 
-# ---------- Optional Chroma backend ----------
-_CHROMA_OK = True
-try:
-    import chromadb  # type: ignore
-    from chromadb.utils import embedding_functions  # noqa: F401 (kept for compatibility)
-except Exception:
-    _CHROMA_OK = False
+# --- Math helpers -------------------------------------------------------------
+def _dot(a: List[float], b: List[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
 
 
-# ---------- Simple in-memory fallback ----------
-# Structure: _MEM[topic_id] = {"ids": [], "embs": [[...]], "texts": [], "metas": []}
-_MEM: Dict[str, Dict[str, List[Any]]] = {}
+def _norm(a: List[float]) -> float:
+    return math.sqrt(sum(x * x for x in a))
+
 
 def _cosine(a: List[float], b: List[float]) -> float:
-    if not a or not b:
-        return 0.0
-    s = sum(x*y for x, y in zip(a, b))
-    na = math.sqrt(sum(x*x for x in a))
-    nb = math.sqrt(sum(y*y for y in b))
+    na, nb = _norm(a), _norm(b)
     if na == 0 or nb == 0:
         return 0.0
-    return s / (na * nb)
+    return _dot(a, b) / (na * nb)
 
 
-# ---------- Public API ----------
-def get_store(topic_id: str):
+# --- Embedding ----------------------------------------------------------------
+def _embed_texts(texts: List[str]) -> List[List[float]]:
     """
-    Returns a collection-like object with:
-      - upsert(texts, metadatas, ids)
-      - query(query_texts=[...], n_results=k) -> dict
-    """
-    if _CHROMA_OK:
-        client_chroma = chromadb.PersistentClient(path=os.path.abspath("./.chroma"))
-        return _ChromaCollection(client_chroma, topic_id)
-    else:
-        # ensure mem bucket
-        _MEM.setdefault(topic_id, {"ids": [], "embs": [], "texts": [], "metas": []})
-        return _MemCollection(topic_id)
-
-
-def upsert_chunks(topic_id: str, texts: List[str], metadatas: List[Dict[str, Any]]) -> None:
-    """
-    Embeds + writes chunks into the vector store for this topic_id.
+    Returns one embedding list per text. Uses OpenAI embeddings API.
     """
     if not texts:
-        return
-
-    # make ids stable if provided inside metadata; otherwise random
-    ids = []
-    for m in metadatas:
-        ids.append(m.get("id") or str(uuid.uuid4()))
-
-    vs = get_store(topic_id)
-
-    # embed in a simple loop (Streamlit Cloud prefers small batches)
-    embs = [embed(t) for t in texts]
-    vs.upsert(texts=texts, metadatas=metadatas, ids=ids, embeddings=embs)
+        return []
+    resp = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    # openai==1.x returns .data[i].embedding
+    return [d.embedding for d in resp.data]
 
 
-def rag_query(topic_id: str, query: str, k: int = 8) -> List[Dict[str, Any]]:
+# --- Upsert APIs --------------------------------------------------------------
+def upsert_chunks_simple(chunks: List[str]) -> List[str]:
     """
-    Returns top-k context items as a list of {text, metadata}
+    Quick insert when you don't care about topic/source tagging.
+    Returns the list of ids that were added.
     """
-    vs = get_store(topic_id)
-    res = vs.query(query_texts=[query], n_results=k)
-    out = []
-    # normalize to list-of-dicts
-    for i in range(len(res["documents"][0])):
-        out.append({
-            "text": res["documents"][0][i],
-            "metadata": res["metadatas"][0][i]
-        })
-    return out
+    return upsert_chunks(topic_id="global", source="misc", chunks=chunks)
 
 
-# ---------- Backends ----------
-class _ChromaCollection:
-    def __init__(self, client_chroma, topic_id: str):
-        self._col = client_chroma.get_or_create_collection(name=f"topic_{topic_id}")
+def upsert_chunks(topic_id: str, source: str, chunks: List[str]) -> List[str]:
+    """
+    Insert chunks with topic/source tags. Generates embeddings and stores them.
+    """
+    ids: List[str] = []
+    if not chunks:
+        return ids
 
-    def upsert(self, texts, metadatas, ids, embeddings):
-        self._col.upsert(
-            ids=ids,
-            documents=texts,
-            metadatas=metadatas,
-            embeddings=embeddings
+    embeddings = _embed_texts(chunks)
+    for text, emb in zip(chunks, embeddings):
+        rid = str(uuid.uuid4())
+        _STORE.append(
+            {
+                "id": rid,
+                "topic_id": topic_id,
+                "source": source,
+                "text": text,
+                "embedding": emb,
+            }
         )
+        ids.append(rid)
+    return ids
 
-    def query(self, query_texts: List[str], n_results: int = 8) -> Dict[str, Any]:
-        # embed the query ourselves for consistency/retry control
-        q_emb = [embed(query_texts[0])]
-        res = self._col.query(query_embeddings=q_emb, n_results=n_results)
-        # Chroma returns keys: ids, distances, documents, metadatas
-        return {
-            "ids": res.get("ids", [[]]),
-            "documents": res.get("documents", [[]]),
-            "metadatas": res.get("metadatas", [[]]),
-            "distances": res.get("distances", [[]]),
+
+# --- Query / RAG --------------------------------------------------------------
+def _top_k(query_vec: List[float], pool: List[Dict[str, Any]], k: int) -> List[Tuple[float, Dict[str, Any]]]:
+    scored = [(_cosine(query_vec, rec["embedding"]), rec) for rec in pool]
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return scored[: max(0, k)]
+
+
+def query(text: str, k: int = 5, topic_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Return top-k matching chunks (dicts with score, text, source, id, topic_id).
+    If topic_id is provided, restrict search to that topic.
+    """
+    if not _STORE:
+        return []
+
+    q_vec = _embed_texts([text])[0]
+    pool = [r for r in _STORE if topic_id is None or r["topic_id"] == topic_id]
+    if not pool:
+        return []
+
+    top = _top_k(q_vec, pool, k)
+    return [
+        {
+            "score": round(score, 6),
+            "id": rec["id"],
+            "text": rec["text"],
+            "source": rec["source"],
+            "topic_id": rec["topic_id"],
         }
+        for score, rec in top
+    ]
 
 
-class _MemCollection:
-    def __init__(self, topic_id: str):
-        self._bucket = _MEM[topic_id]
+def rag_query(topic_id: str, query_text: str, k: int = 5) -> str:
+    """
+    Convenience helper used by the synthesizer: returns a single
+    context string concatenating the top-k chunk texts for this topic.
+    """
+    hits = query(query_text, k=k, topic_id=topic_id)
+    if not hits:
+        return ""
+    # De-duplicate while keeping order
+    seen = set()
+    parts: List[str] = []
+    for h in hits:
+        t = h["text"].strip()
+        if t and t not in seen:
+            parts.append(t)
+            seen.add(t)
+    return "\n\n".join(parts)
 
-    def upsert(self, texts, metadatas, ids, embeddings):
-        self._bucket["ids"].extend(ids)
-        self._bucket["texts"].extend(texts)
-        self._bucket["metas"].extend(metadatas)
-        self._bucket["embs"].extend(embeddings)
 
-    def query(self, query_texts: List[str], n_results: int = 8) -> Dict[str, Any]:
-        q = embed(query_texts[0])
-        sims = [(_cosine(q, e), i) for i, e in enumerate(self._bucket["embs"])]
-        sims.sort(reverse=True)
-        take = sims[:n_results]
+# --- Maintenance --------------------------------------------------------------
+def reset() -> None:
+    """Clear the in-memory store (useful between runs/tests)."""
+    _STORE.clear()
 
-        docs = []
-        metas = []
-        ids = []
-        dists = []
-        for score, idx in take:
-            docs.append(self._bucket["texts"][idx])
-            metas.append(self._bucket["metas"][idx])
-            ids.append(self._bucket["ids"][idx])
-            # convert similarity to pseudo-distance
-            dists.append(1.0 - score)
 
-        return {
-            "ids": [ids],
-            "documents": [docs],
-            "metadatas": [metas],
-            "distances": [dists],
-        }
-def get_chroma():
-    import chromadb
-    from chromadb.api.client import Client as ClientCreator
-    return ClientCreator()
-
-def embed(texts):
-    from openai import OpenAI
-    client = OpenAI()
-    return client.embeddings.create(model=EMBEDDING_MODEL, input=texts).data
+def count(topic_id: Optional[str] = None) -> int:
+    """How many chunks are stored (optionally for a topic)."""
+    if topic_id is None:
+        return len(_STORE)
+    return sum(1 for r in _STORE if r["topic_id"] == topic_id)
