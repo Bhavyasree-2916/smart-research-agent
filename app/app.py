@@ -1,6 +1,8 @@
 # app/app.py
 # Smart Research → Brief → Quiz (Streamlit)
 # Safe to run on Streamlit Cloud. Optional Supabase is handled gracefully.
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from __future__ import annotations
 
@@ -24,9 +26,19 @@ except Exception:
 
 # ========= Agents & tools (required) =========
 # These should exist in your repo.
-from agents.researcher import research_from_web  # -> List[Dict]
-from agents.synthesizer import synthesize_brief   # -> Dict[brief, citations]
-from agents.quiz import generate_quiz             # -> List[Dict]
+try:
+    from agents.researcher import research_from_web
+except ModuleNotFoundError:
+    from smart_research_agent.agents.researcher import research_from_web
+try:
+    from agents.synthesizer import synthesize_brief
+except ModuleNotFoundError:
+    from smart_research_agent.agents.synthesizer import synthesize_brief
+try:
+    from agents.quiz import generate_quiz
+except ModuleNotFoundError:
+    from smart_research_agent.agents.quiz import generate_quiz
+
 # Optional readability validation (won't fail if missing)
 try:
     from tools.validation import flesch_kincaid_grade
