@@ -1,4 +1,5 @@
 # agents/quiz.py
+from __future__ import annotations
 import re, json, random
 from typing import List, Dict
 from collections import Counter
