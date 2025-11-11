@@ -1,8 +1,8 @@
 from __future__ import annotations
 import os
 import sys
-import json
 import traceback
+import json
 import streamlit as st
 from typing import List, Dict, Any
 
@@ -12,152 +12,93 @@ PROJECT_ROOT = os.path.dirname(APP_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# ---------- SAFE IMPORTS ----------
+# ---------- IMPORTS ----------
 try:
     from agents.researcher import research_from_web
-except Exception:
-    st.error("❌ Could not import researcher agent.")
-    st.code(traceback.format_exc())
-    research_from_web = lambda *a, **kw: []
-
-try:
     from agents.synthesizer import synthesize_brief
-except Exception:
-    st.error("❌ Could not import synthesizer agent.")
-    st.code(traceback.format_exc())
-    synthesize_brief = lambda *a, **kw: {"brief": "", "citations": []}
-
-try:
     from agents.quiz import generate_quiz
-except Exception:
-    st.error("❌ Could not import quiz generator.")
+except Exception as e:
+    st.error("❌ Error importing agents.")
     st.code(traceback.format_exc())
-    generate_quiz = lambda *a, **kw: []
-
-# ---------- KEYS / MODELS ----------
-OPEN_API_KEY = os.getenv("OPEN_API_KEY") or os.getenv("OPENAI_API_KEY")
-MODEL_SMALL = os.getenv("MODEL_SMALL", "gpt-4o-mini")
 
 # ---------- PAGE SETUP ----------
 st.set_page_config(page_title="Smart Research Agent", page_icon="🧠", layout="wide")
+
 st.title("🧠 Smart Research → Brief → Quiz Agent")
+st.write("Enter a topic to research, generate a brief, and create a quiz — all in one place.")
 
-with st.expander("⚙️ Environment Check", expanded=False):
-    st.write("Model:", MODEL_SMALL)
-    st.write("OpenAI Key:", "✅ Found" if OPEN_API_KEY else "❌ Missing")
+# ---------- INPUT CONTROLS ----------
+topic = st.text_input("🎯 Enter your topic:", placeholder="e.g., Impact of AI in healthcare")
+num_sources = st.slider("🔎 Number of sources to collect", 3, 10, 5)
+num_questions = st.slider("🧩 Number of quiz questions", 3, 10, 5)
 
-# ---------- MAIN TABS ----------
-tab_research, tab_brief, tab_quiz = st.tabs(["🌐 Research", "🧾 Brief", "🧩 Quiz"])
+# ---------- RUN BUTTON ----------
+if st.button("🚀 Run Agent"):
+    if not topic.strip():
+        st.warning("Please enter a valid topic.")
+    else:
+        try:
+            # -------- STEP 1: Research --------
+            with st.spinner("🔍 Researching topic from the web..."):
+                sources = research_from_web(topic, num_sources=num_sources)
+                st.session_state["sources"] = sources
+            st.success("✅ Research completed successfully!")
 
-# ============================================
-# 🌐 TAB 1 — Research Agent
-# ============================================
-with tab_research:
-    st.header("🌐 Research from Web")
-    topic = st.text_input("Enter a topic or question", placeholder="e.g., Impact of AI in healthcare")
-    n_sources = st.slider("Number of web sources", 3, 10, 5)
+            # -------- STEP 2: Synthesize Brief --------
+            with st.spinner("🧠 Synthesizing research brief..."):
+                result = synthesize_brief(topic=topic, sources=sources)
+                brief = result.get("brief", "")
+                citations = result.get("citations", [])
+                st.session_state["brief"] = brief
+                st.session_state["citations"] = citations
 
-    if st.button("🔍 Search and Summarize"):
-        if not topic.strip():
-            st.warning("Please enter a topic to research.")
-        else:
-            with st.spinner("Researching the web..."):
-                try:
-                    results = research_from_web(topic, n_sources)
-                    st.session_state["research_sources"] = results
-                    st.session_state["topic_name"] = topic
-                except Exception as e:
-                    st.error("Research agent failed.")
-                    st.code(traceback.format_exc())
+            st.subheader("🧾 Research Brief")
+            st.write(brief)
 
-    if "research_sources" in st.session_state:
-        st.success("✅ Research completed! Sources:")
-        for i, src in enumerate(st.session_state["research_sources"], start=1):
-            st.markdown(f"**{i}.** {src.get('title', 'Untitled')} — {src.get('url', '')}")
+            if citations:
+                st.markdown("**📚 References:**")
+                for c in citations:
+                    st.markdown(f"- {c}")
 
-# ============================================
-# 🧾 TAB 2 — Synthesize Brief
-# ============================================
-with tab_brief:
-    st.header("🧾 Generate Research Brief")
-    topic_name = st.session_state.get("topic_name", "")
-    topic_input = st.text_input("Enter topic name", value=topic_name, placeholder="e.g., Impact of AI in healthcare")
+            # -------- STEP 3: Generate Quiz --------
+            with st.spinner("🎯 Generating quiz questions..."):
+                quiz = generate_quiz(brief, n=num_questions)
+                st.session_state["quiz"] = quiz
 
-    if st.button("🧠 Synthesize Brief"):
-        with st.spinner("Synthesizing summary and citations..."):
-            try:
-                sources = st.session_state.get("research_sources", [])
-                if not sources:
-                    st.warning("Please run the Research tab first.")
-                else:
-                    result = synthesize_brief(topic=topic_input, sources=sources)
-                    st.session_state["brief"] = result.get("brief", "")
-                    st.session_state["citations"] = result.get("citations", [])
-                    st.session_state["topic_name"] = topic_input
-            except Exception:
-                st.error("Brief synthesis failed.")
-                st.code(traceback.format_exc())
+            st.subheader("🧩 Quiz Questions")
+            for i, q in enumerate(quiz, start=1):
+                st.markdown(f"**Q{i}. {q.get('question', '')}**")
+                options = q.get("options", [])
+                answer = q.get("answer", "")
+                selected = st.radio(
+                    f"Select your answer for Q{i}",
+                    options,
+                    key=f"q{i}",
+                    label_visibility="collapsed",
+                )
+                if selected:
+                    if selected == answer:
+                        st.success("✅ Correct!")
+                    else:
+                        st.error(f"❌ Correct Answer: {answer}")
 
-    if "brief" in st.session_state:
-        st.subheader("🧠 Research Brief")
-        st.write(st.session_state["brief"])
-        if st.session_state.get("citations"):
-            st.markdown("**📚 Citations:**")
-            for c in st.session_state["citations"]:
-                st.markdown(f"- {c}")
-
-# ============================================
-# 🧩 TAB 3 — Quiz Generator
-# ============================================
-with tab_quiz:
-    st.header("🧩 Quiz Agent")
-    st.write("Generate quiz questions based on your research brief.")
-
-    brief_text = st.text_area(
-        "Paste your research brief text below:",
-        value=st.session_state.get("brief", ""),
-        height=220
-    )
-    num_q = st.slider("Number of questions", 3, 10, 5)
-
-    if st.button("🎯 Generate Quiz"):
-        if not brief_text.strip():
-            st.warning("Please provide brief text.")
-        else:
-            with st.spinner("Generating quiz..."):
-                try:
-                    quiz = generate_quiz(brief_text, n=num_q)
-                    st.session_state["quiz"] = quiz
-                except Exception:
-                    st.error("Quiz generation failed.")
-                    st.code(traceback.format_exc())
-
-    if "quiz" in st.session_state and st.session_state["quiz"]:
-        st.success("✅ Quiz generated!")
-        for i, q in enumerate(st.session_state["quiz"], 1):
-            st.markdown(f"**Q{i}. {q.get('question', '')}**")
-            opts = q.get("options", [])
-            choice = st.radio(
-                f"Choose answer for Q{i}",
-                opts,
-                index=None,
-                key=f"quiz_q{i}",
-                label_visibility="collapsed"
+            # -------- DOWNLOAD BUTTON --------
+            st.download_button(
+                "⬇️ Download Results (JSON)",
+                data=json.dumps({
+                    "topic": topic,
+                    "brief": brief,
+                    "citations": citations,
+                    "quiz": quiz
+                }, indent=2),
+                file_name=f"{topic.replace(' ', '_')}_results.json",
+                mime="application/json"
             )
-            correct = q.get("answer")
-            if choice:
-                if choice == correct:
-                    st.write("✅ Correct!")
-                else:
-                    st.write(f"❌ Correct answer: **{correct}**")
-            st.divider()
 
-        st.download_button(
-            "⬇️ Download Quiz JSON",
-            data=json.dumps(st.session_state["quiz"], indent=2, ensure_ascii=False),
-            file_name="quiz.json",
-            mime="application/json"
-        )
+        except Exception as e:
+            st.error("🚨 Research agent failed. See details below:")
+            st.code(traceback.format_exc())
 
 # ---------- FOOTER ----------
 st.caption("Built with ❤️ using Streamlit, OpenAI, and Supabase.")
+ss
