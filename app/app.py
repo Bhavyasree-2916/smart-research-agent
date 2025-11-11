@@ -63,7 +63,7 @@ with tab_research:
         else:
             with st.spinner("Researching the web..."):
                 try:
-                    results = research_from_web(topic, n=n_sources)
+                    results = research_from_web(topic, n_sources)
                     st.session_state["research_sources"] = results
                     st.session_state["topic_name"] = topic
                 except Exception as e:
