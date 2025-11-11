@@ -2,15 +2,13 @@
 # Smart Research → Brief → Quiz (Streamlit)
 # Safe to run on Streamlit Cloud. Optional Supabase is handled gracefully.
 
+from __future__ import annotations
+import os,sys,traceback,json
+import uuid
+from typing import Dict, List, Any
 from agents.researcher import research_from_web
 from agents.synthesizer import synthesize_brief
 from agents.quiz import generate_quiz
-from __future__ import annotations
-
-import os,sys
-import uuid
-from typing import Dict, List, Any
-
 import streamlit as st
 
 # ========= Optional cloud (Supabase) =========
