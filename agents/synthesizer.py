@@ -24,23 +24,8 @@ Base your answer ONLY on the provided context.
     )
     return msg.choices[0].message.content.strip()
 
-def synthesize_brief(topic: str, sources: List[Dict], topic_id: str = "default"):
+def synthesize_brief(topic: str, sources: int, topic_id: str = None):
     ctx = rag_query(topic_id, topic, k=15)
-    if not ctx:  # fallback if nothing in vector store yet
-        top = sources[:3] if len(sources) > 3 else sources
-        ctx = [{"text": s["text"], "metadata": {"url": s["url"], "domain": s["domain"]}} for s in top]
-
-    brief = _llm_summarize(ctx, topic)
-
-    # build citations from retrieved context
-    seen, citations = set(), []
-    for c in ctx:
-        url = c["metadata"].get("url", "")
-        dom = c["metadata"].get("domain", "")
-        if url and url not in seen:
-            citations.append({"id": len(citations)+1, "url": url, "domain": dom})
-            seen.add(url)
-        if len(citations) >= 5:
-            break
-
-    return {"brief": brief, "citations": citations}
+    brief = make_brief(topic, ctx)  # whatever you call your summarizer
+    citations = ctx                  # or extract only what you need
+    return brief, citations

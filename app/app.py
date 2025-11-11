@@ -88,8 +88,14 @@ if run_btn and topic.strip():
 
         # 3) SYNTHESIZE (RAG → brief + citations)
         s.update(label="Synthesizing brief…")
-        brief = synthesize_brief(topic, sources, topic_id=topic_id)  # dict: {brief, citations}
-
+        result = synthesize_brief(topic, sources, topic_id=topic_id)  # dict: {brief, citations}
+        if isinstance(result, tuple) and len(result) == 2:
+            brief, citations = result
+        elif isinstance(result, dict):
+            brief = result.get("brief") or result.get("summary") or ""
+            citations = result.get("citations") or result.get("sources") or []
+        else:
+            raise ValueError("Unexpected return value from synthesize_brief()")
         # 4) QUIZ
         s.update(label="Generating quiz…")
         quiz = make_quiz(brief["brief"],topic=topic,n=5)
