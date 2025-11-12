@@ -4,19 +4,11 @@
 
 from __future__ import annotations
 
-import sys
+import os
 import uuid
-from pathlib import Path
 from typing import Dict, List, Any
 
 import streamlit as st
-
-# ---------------------
-# Ensure repo root is on sys.path (fixes imports on Streamlit Cloud)
-# ---------------------
-ROOT_DIR = Path(__file__).resolve().parents[1]  # points to /app
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 # ========= Optional cloud (Supabase) =========
 # If tools.cloud is not present or not configured, we fall back to no-ops.
@@ -31,22 +23,10 @@ except Exception:
         return None
 
 # ========= Agents & tools (required) =========
-# These should exist in your repo. Import errors will be surfaced if missing.
-try:
-    from agents.researcher import research_from_web  # -> List[Dict]
-except Exception as e:
-    raise ImportError("Could not import agents.researcher. Ensure agents/ is present and named correctly.") from e
-
-try:
-    from agents.synthesizer import synthesize_brief   # -> Dict[brief, citations]
-except Exception as e:
-    raise ImportError("Could not import agents.synthesizer. Ensure agents/ is present and named correctly.") from e
-
-try:
-    from agents.quiz import generate_quiz             # -> List[Dict]
-except Exception as e:
-    raise ImportError("Could not import agents.quiz. Ensure agents/ is present and named correctly.") from e
-
+# These should exist in your repo.
+from agents.researcher import research_from_web  # -> List[Dict]
+from agents.synthesizer import synthesize_brief   # -> Dict[brief, citations]
+from agents.quiz import generate_quiz             # -> List[Dict]
 # Optional readability validation (won't fail if missing)
 try:
     from tools.validation import flesch_kincaid_grade
@@ -111,7 +91,7 @@ if run_btn and topic.strip():
             sources: List[Dict[str, Any]] = research_from_web(
                 topic=topic.strip(),
                 n_sources=sources_per_subquery
-            ) or []
+            )
         except Exception as e:
             st.error(f"Research step failed: {e}")
             st.stop()
@@ -124,10 +104,7 @@ if run_btn and topic.strip():
             for i, s in enumerate(sources, 1):
                 title = s.get("title") or "Untitled"
                 url = s.get("url") or ""
-                snippet = s.get("snippet") or ""
                 st.markdown(f"**{i}. {title}**  \n{url}")
-                if snippet:
-                    st.write(snippet)
 
     # Step 2: Synthesize brief
     with st.spinner("🧵 Synthesizing brief…"):
@@ -137,24 +114,24 @@ if run_btn and topic.strip():
                 sources=sources,
                 topic_id=topic_id,
                 k=15,  # retrieval size; your synthesizer can ignore if unused
-            ) or {}
+            )
         except Exception as e:
             st.error(f"Synthesis step failed: {e}")
             st.stop()
 
-    brief: str = (result or {}).get("brief", "") or ""
-    citations: List[Dict[str, Any]] = (result or {}).get("citations", []) or []
+    brief: str = (result or {}).get("brief", "").strip()
+    citations: List[Dict[str, Any]] = (result or {}).get("citations", [])
 
-    if not brief.strip():
+    if not brief:
         st.error("No brief produced. Check your OpenAI key and network, then try again.")
         st.stop()
 
     # Optional: readability
     grade = 0.0
     try:
-        grade = float(flesch_kincaid_grade(brief))
+        grade = flesch_kincaid_grade(brief)
     except Exception:
-        grade = 0.0
+        pass
 
     st.subheader("📝 Brief")
     st.write(brief)
@@ -175,7 +152,7 @@ if run_btn and topic.strip():
             quiz: List[Dict[str, Any]] = generate_quiz(
                 brief_text=brief,
                 n=num_quiz_questions
-            ) or []
+            )
         except Exception as e:
             st.error(f"Quiz step failed: {e}")
             st.stop()
@@ -186,25 +163,17 @@ if run_btn and topic.strip():
     else:
         # Render MCQs, ensure unique questions
         asked = set()
-        q_index = 0
-        for q in quiz:
+        for idx, q in enumerate(quiz, 1):
             qtext = (q.get("question") or "").strip()
             if not qtext or qtext.lower() in asked:
                 continue
             asked.add(qtext.lower())
-            q_index += 1
 
-            # Use a container for separation
-            with st.container():
-                st.markdown(f"**Q{q_index}. {qtext}**")
+            with st.container(border=True):
+                st.markdown(f"**Q{idx}. {qtext}**")
                 options = q.get("options") or []
-                if not isinstance(options, list):
-                    options = list(options) if options else []
-                key = f"q_{q_index}_{uuid.uuid4().hex[:6]}"
-                if options:
-                    st.radio(" ", options, key=key, label_visibility="collapsed")
-                else:
-                    st.write("_No options provided for this question_")
+                key = f"q_{idx}_{uuid.uuid4().hex[:6]}"
+                st.radio(" ", options, key=key, label_visibility="collapsed")
 
     # Optional: save to Supabase (if configured)
     if is_configured():
